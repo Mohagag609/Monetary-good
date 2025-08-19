@@ -293,17 +293,7 @@ function logAction(description, details = {}) {
     });
 }
 const fmt = new Intl.NumberFormat('ar-EG', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); function egp(v){ v=Number(v||0); return isFinite(v)?fmt.format(v)+' ج.م':'' }
-function applySettings(){ document.documentElement.setAttribute('data-theme', state.settings.theme||'dark'); document.documentElement.style.fontSize=(state.settings.font||16)+'px'; }
-applySettings();
-document.getElementById('themeSel').value=state.settings.theme||'dark';
-document.getElementById('fontSel').value=String(state.settings.font||16);
-document.getElementById('themeSel').onchange=(e)=>{ state.settings.theme=e.target.value; persist(); };
-document.getElementById('fontSel').onchange=(e)=>{ state.settings.font=Number(e.target.value); persist(); };
-document.getElementById('lockBtn').onclick=()=>{
-  const pass=prompt('ضع كلمة مرور أو اتركها فارغة لإلغاء القفل','');
-  state.locked=!!pass; state.settings.pass=pass||null; persist();
-  alert(state.locked?'تم تفعيل القفل':'تم إلغاء القفل'); checkLock();
-};
+function applySettings(){ if(state && state.settings) { document.documentElement.setAttribute('data-theme', state.settings.theme||'dark'); document.documentElement.style.fontSize=(state.settings.font||16)+'px'; } }
 function checkLock(){
   if(state.locked){
     const p=prompt('اكتب كلمة المرور للدخول');
