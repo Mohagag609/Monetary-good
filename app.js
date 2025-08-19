@@ -83,47 +83,76 @@ async function initializeApp() {
             navigator.serviceWorker.register('/sw.js').then(reg => console.log('SW registered.'), err => console.log('SW registration failed:', err));
         });
     }
+
+    // 1. Initialize state with a default, empty but valid structure.
+    state = { settings: {theme:'dark',font:16, pass:null}, locked: false };
+    OBJECT_STORES.forEach(storeName => {
+        if (storeName !== 'keyval' && storeName !== 'settings') {
+            state[storeName] = [];
+        }
+    });
+
     try {
         await openDB();
         const migrationComplete = await getKeyVal('migrationComplete');
+        let loadedState;
+
         if (migrationComplete) {
-            state = await loadStateFromDB();
+            loadedState = await loadStateFromDB();
         } else {
             const localStorageState = loadFromLocalStorage();
             if (localStorageState && localStorageState.customers && localStorageState.customers.length > 0) {
-                state = localStorageState;
+                loadedState = localStorageState;
+                // Temporarily assign to the global state to persist it correctly
+                const tempState = state;
+                state = loadedState;
                 await persist();
-            } else {
-                state = await loadStateFromDB();
+                state = tempState; // Revert to empty state before merging
             }
             await setKeyVal('migrationComplete', true);
         }
-        OBJECT_STORES.forEach(storeName => { if (storeName !== 'keyval' && storeName !== 'settings' && !state[storeName]) { state[storeName] = []; } });
-        if (typeof state.settings !== 'object' || state.settings === null) { state.settings = {theme:'dark',font:16, pass:null}; }
-        if (!state.locked) { state.locked = false; }
-        if (state.safes && state.safes.length === 0) { state.safes.push({ id: uid('S'), name: 'الخزنة الرئيسية', balance: 0 }); await persist(); }
 
-        applySettings();
-        if (state.settings) {
-            document.getElementById('themeSel').value=state.settings.theme||'dark';
-            document.getElementById('fontSel').value=String(state.settings.font||16);
+        // 2. If data was loaded, merge it into the default state.
+        if (loadedState) {
+            for(const key in loadedState) {
+                if (key === 'settings' && typeof loadedState[key] === 'object' && loadedState[key] !== null) {
+                    Object.assign(state.settings, loadedState[key]);
+                } else {
+                    state[key] = loadedState[key];
+                }
+            }
         }
-        document.getElementById('themeSel').onchange= async (e)=>{ state.settings.theme=e.target.value; await persist(); };
-        document.getElementById('fontSel').onchange= async (e)=>{ state.settings.font=Number(e.target.value); await persist(); };
-        document.getElementById('lockBtn').onclick= async ()=>{ const pass=prompt('ضع كلمة مرور أو اتركها فارغة لإلغاء القفل',''); state.locked=!!pass; state.settings.pass=pass||null; await persist(); alert(state.locked?'تم تفعيل القفل':'تم إلغاء القفل'); checkLock(); };
-        const undoBtn = document.getElementById('undoBtn');
-        const redoBtn = document.getElementById('redoBtn');
-        if(undoBtn) undoBtn.onclick = undo;
-        if(redoBtn) redoBtn.onclick = redo;
 
-        checkLock();
-        saveState();
-        updateUndoRedoButtons();
-        nav('dash');
     } catch (error) {
-        console.error("Failed to initialize the application:", error);
-        view.innerHTML = `<div class="card warn"><h3>خطأ فادح</h3><p>لم يتمكن التطبيق من التحميل. قد تكون قاعدة البيانات تالفة أو أن متصفحك لا يدعم IndexedDB.</p><pre>${error}</pre></div>`;
+        console.error("Failed to load or migrate data:", error);
+        // Do not block the app, just show an alert. The app will run with an empty state.
+        alert("حدث خطأ أثناء تحميل البيانات. قد يتم عرض بيانات فارغة. الرجاء محاولة تحديث الصفحة أو مسح بيانات الموقع.");
     }
+
+    // 3. Run startup sequence with a guaranteed valid state object.
+    if (state.safes && state.safes.length === 0) {
+        state.safes.push({ id: uid('S'), name: 'الخزنة الرئيسية', balance: 0 });
+        await persist();
+    }
+
+    applySettings();
+    if (state.settings) {
+        document.getElementById('themeSel').value=state.settings.theme||'dark';
+        document.getElementById('fontSel').value=String(state.settings.font||16);
+    }
+    document.getElementById('themeSel').onchange= async (e)=>{ state.settings.theme=e.target.value; await persist(); };
+    document.getElementById('fontSel').onchange= async (e)=>{ state.settings.font=Number(e.target.value); await persist(); };
+    document.getElementById('lockBtn').onclick= async ()=>{ const pass=prompt('ضع كلمة مرور أو اتركها فارغة لإلغاء القفل',''); state.locked=!!pass; state.settings.pass=pass||null; await persist(); alert(state.locked?'تم تفعيل القفل':'تم إلغاء القفل'); checkLock(); };
+
+    const undoBtn = document.getElementById('undoBtn');
+    const redoBtn = document.getElementById('redoBtn');
+    if(undoBtn) undoBtn.onclick = undo;
+    if(redoBtn) redoBtn.onclick = redo;
+
+    checkLock();
+    saveState();
+    updateUndoRedoButtons();
+    nav('dash');
 }
 
 function uid(p){ return p+'-'+Math.random().toString(36).slice(2,9); }
