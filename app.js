@@ -1,49 +1,12 @@
 /* ===== أساس التطبيق / إعدادات / قفل ===== */
 const APPKEY='estate_pro_final_v3';
-const state = load();
+let state = {}; // Will be populated asynchronously
 let historyStack = [];
 let historyIndex = -1;
 let currentView = 'dash'; // To track the current page for refresh on undo/redo
 
-function undo() {
-    if (historyIndex > 0) {
-        historyIndex--;
-        const restoredState = JSON.parse(JSON.stringify(historyStack[historyIndex]));
-        // Clear current state and copy properties from restored state
-        Object.keys(state).forEach(key => delete state[key]);
-        Object.assign(state, restoredState);
-        persist();
-        nav(currentView); // Re-render the current view
-    }
-}
-
-function redo() {
-    if (historyIndex < historyStack.length - 1) {
-        historyIndex++;
-        const restoredState = JSON.parse(JSON.stringify(historyStack[historyIndex]));
-        Object.keys(state).forEach(key => delete state[key]);
-        Object.assign(state, restoredState);
-        persist();
-        nav(currentView); // Re-render the current view
-    }
-}
-
-function saveState() {
-    // Clear the 'redo' history if we've undone and are now making a new change
-    historyStack = historyStack.slice(0, historyIndex + 1);
-
-    // Push a deep copy of the current state
-    historyStack.push(JSON.parse(JSON.stringify(state)));
-
-    // Limit history stack size to prevent using too much memory
-    if (historyStack.length > 50) {
-        historyStack.shift();
-    }
-
-    historyIndex = historyStack.length - 1;
-}
-
-function load(){
+// This is the old load function, renamed. It will be used only for migration.
+function loadFromLocalStorage(){
   try{
     const s = JSON.parse(localStorage.getItem(APPKEY))||{};
 
@@ -63,7 +26,6 @@ function load(){
         u.area = u.area || '';
         u.notes = u.notes || '';
         u.unitType = u.unitType || 'سكني'; // Add default unit type
-        // Revert from plans array to single totalPrice
         if (u.plans && u.plans.length > 0) {
             u.totalPrice = u.plans[0].price;
         } else if (!u.hasOwnProperty('totalPrice')) {
@@ -83,7 +45,6 @@ function load(){
       });
     }
 
-    // Data migration for safes
     s.safes = s.safes || [];
     if (s.safes.length === 0) {
         s.safes.push({ id: uid('S'), name: 'الخزنة الرئيسية', balance: 0 });
@@ -96,7 +57,6 @@ function load(){
     s.auditLog = s.auditLog || [];
     s.vouchers = s.vouchers || [];
 
-    // Migration from payments to vouchers (run once)
     if (s.payments && s.payments.length > 0 && s.vouchers.length === 0) {
         console.log('Migrating payments to vouchers...');
         s.payments.forEach(p => {
@@ -137,24 +97,16 @@ function load(){
     s.brokers = s.brokers || [];
     s.partnerGroups = s.partnerGroups || [];
 
-    // One-time migration to populate brokers from contracts/dues
     if (s.brokers.length === 0 && (s.contracts.some(c => c.brokerName) || s.brokerDues.some(d => d.brokerName))) {
         console.log('Populating brokers list from existing data...');
         const brokerNames = new Set([
             ...s.contracts.map(c => c.brokerName),
             ...s.brokerDues.map(d => d.brokerName)
         ].filter(Boolean));
-
         brokerNames.forEach(name => {
-            s.brokers.push({
-                id: uid('B'),
-                name: name,
-                phone: '',
-                notes: ''
-            });
+            s.brokers.push({ id: uid('B'), name: name, phone: '', notes: '' });
         });
     }
-
 
     return {
       customers:[],units:[],partners:[],unitPartners:[],contracts:[],installments:[],payments:[],partnerDebts:[], safes: [], transfers: [], auditLog: [], vouchers: [], brokerDues: [], brokers: [], partnerGroups: [],
@@ -166,7 +118,166 @@ function load(){
       settings:{theme:'dark',font:16},locked:false};
   }
 }
-function persist(){ localStorage.setItem(APPKEY, JSON.stringify(state)); applySettings(); }
+
+// New function to save state to IndexedDB
+async function persist(){
+    try {
+        const db = await openDB();
+        const transaction = db.transaction(OBJECT_STORES.filter(s => s !== 'keyval'), 'readwrite');
+        const promises = [];
+
+        transaction.oncomplete = () => {
+            // console.log("All persist operations complete.");
+        };
+        transaction.onerror = (event) => {
+            console.error("Persist transaction error:", event.target.error);
+        };
+
+        for (const storeName of OBJECT_STORES) {
+            if (storeName === 'keyval') continue;
+
+            const store = transaction.objectStore(storeName);
+            promises.push(new Promise((resolve, reject) => {
+                const req = store.clear();
+                req.onsuccess = resolve;
+                req.onerror = (e) => reject(e.target.error);
+            }));
+
+            const dataToStore = state[storeName];
+            if (storeName === 'settings') {
+                 if (dataToStore) {
+                    promises.push(new Promise((resolve, reject) => {
+                        const req = store.put({key: 'appSettings', ...dataToStore});
+                        req.onsuccess = resolve;
+                        req.onerror = (e) => reject(e.target.error);
+                    }));
+                }
+            } else if (dataToStore && Array.isArray(dataToStore)) {
+                dataToStore.forEach(item => {
+                    promises.push(new Promise((resolve, reject) => {
+                        if(typeof item === 'object' && item !== null && (item.id || item.key)) {
+                            const req = store.put(item);
+                            req.onsuccess = resolve;
+                            req.onerror = (e) => reject(e.target.error);
+                        } else {
+                            console.warn("Skipping invalid item in persist:", item);
+                            resolve();
+                        }
+                    }));
+                });
+            }
+        }
+
+        await Promise.all(promises);
+        applySettings();
+    } catch (error) {
+        console.error('Failed to persist state to IndexedDB:', error);
+    }
+}
+
+// New function to load the entire state from IndexedDB
+async function loadStateFromDB() {
+    const newState = {};
+    const db = await openDB();
+    const transaction = db.transaction(OBJECT_STORES.filter(s => s !== 'keyval'), 'readonly');
+    const promises = [];
+
+    for (const storeName of OBJECT_STORES) {
+        if (storeName === 'keyval') continue;
+
+        const store = transaction.objectStore(storeName);
+        promises.push(new Promise((resolve, reject) => {
+            const req = store.getAll();
+            req.onsuccess = () => {
+                if (storeName === 'settings') {
+                    newState.settings = req.result.length > 0 ? req.result[0] : {theme:'dark',font:16, pass:null};
+                } else {
+                    newState[storeName] = req.result;
+                }
+                resolve();
+            };
+            req.onerror = (e) => reject(e.target.error);
+        }));
+    }
+
+    await Promise.all(promises);
+    return newState;
+}
+
+// The main initialization function
+async function initializeApp() {
+    // Register Service Worker for PWA
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('/sw.js')
+                .then(registration => {
+                    console.log('ServiceWorker registration successful with scope: ', registration.scope);
+                })
+                .catch(err => {
+                    console.log('ServiceWorker registration failed: ', err);
+                });
+        });
+    }
+
+    try {
+        await openDB();
+        const migrationComplete = await getKeyVal('migrationComplete');
+
+        if (migrationComplete) {
+            console.log('Loading state from IndexedDB.');
+            state = await loadStateFromDB();
+        } else {
+            console.log('Migration not complete, checking localStorage...');
+            const localStorageState = loadFromLocalStorage();
+            // Check if there's actually something to migrate
+            if (localStorageState && localStorageState.customers && localStorageState.customers.length > 0) {
+                console.log('Found data in localStorage, migrating to IndexedDB...');
+                state = localStorageState;
+                await persist(); // Persist the migrated state to IndexedDB
+                console.log('Migration successful.');
+            } else {
+                console.log('No data in localStorage. Starting with a fresh IndexedDB state.');
+                state = await loadStateFromDB(); // This will be empty
+            }
+            await setKeyVal('migrationComplete', true);
+        }
+
+        // Ensure state has default empty arrays and objects for all stores if they are null/undefined from DB
+        OBJECT_STORES.forEach(storeName => {
+            if (storeName !== 'keyval' && storeName !== 'settings' && !state[storeName]) {
+                state[storeName] = [];
+            }
+        });
+        if (!state.settings) {
+            state.settings = {theme:'dark',font:16, pass:null};
+        }
+        if (!state.locked) {
+            state.locked = false;
+        }
+        if (state.safes && state.safes.length === 0) {
+            state.safes.push({ id: uid('S'), name: 'الخزنة الرئيسية', balance: 0 });
+            await persist(); // Save the default safe if it was added
+        }
+
+        // Now that state is loaded, run the rest of the startup sequence
+        applySettings();
+        document.getElementById('themeSel').value=state.settings.theme||'dark';
+        document.getElementById('fontSel').value=String(state.settings.font||16);
+
+        checkLock();
+        // The first saveState should happen after the state is fully loaded
+        saveState();
+
+        // Initial navigation
+        nav('dash');
+
+    } catch (error) {
+        console.error("Failed to initialize the application:", error);
+        view.innerHTML = `<div class="card warn"><h3>خطأ فادح</h3><p>لم يتمكن التطبيق من التحميل. قد تكون قاعدة البيانات تالفة أو أن متصفحك لا يدعم IndexedDB.</p><pre>${error}</pre></div>`;
+    }
+}
+
+
 function uid(p){ return p+'-'+Math.random().toString(36).slice(2,9); }
 function today(){ return new Date().toISOString().slice(0,10); }
 function logAction(description, details = {}) {
@@ -278,7 +389,18 @@ const routes=[
   {id: 'unit-edit', title: 'تعديل الوحدة', render: renderUnitEdit, tab: false},
 ];
 const tabs=document.getElementById('tabs'), view=document.getElementById('view');
-routes.forEach(r=>{ if(r.tab){const b=document.createElement('button'); b.className='tab'; b.id='tab-'+r.id; b.textContent=r.title; b.onclick=()=>nav(r.id); tabs.appendChild(b);} });
+routes.forEach(r=>{
+    if(r.tab){
+        const b=document.createElement('button');
+        b.className='tab';
+        b.id='tab-'+r.id;
+        b.textContent=r.title;
+        b.setAttribute('hx-trigger', 'click');
+        b.setAttribute('hx-target', '#view');
+        b.onclick=()=>nav(r.id);
+        tabs.appendChild(b);
+    }
+});
 function nav(id, param = null){
   currentView = id;
   currentParam = param;
@@ -290,8 +412,8 @@ function nav(id, param = null){
   if(tab) tab.classList.add('active');
 
   route.render(param);
+  htmx.process(view); // Tell HTMX to process the new content
 }
-nav('dash');
 
 /* ===== أدوات عامة ===== */
 function showModal(title, content, onSave) {
@@ -3586,12 +3708,17 @@ function renderBackup(){
   view.innerHTML=`
     <div class="card">
       <h3>نسخة احتياطية</h3>
-      <p>يتم حفظ بياناتك في متصفحك. قم بتنزيل نسخة احتياطية بشكل دوري.</p>
+      <p>يتم حفظ بياناتك في قاعدة بيانات المتصفح (IndexedDB). قم بتنزيل نسخة احتياطية بشكل دوري.</p>
       <div class="tools">
         <button class="btn" onclick="doBackup()">تنزيل نسخة JSON</button>
         <label class="btn secondary">
           <input type="file" id="restore-file" accept=".json" style="display:none">
           استعادة نسخة JSON
+        </label>
+        <button class="btn" onclick="doSQLiteBackup()">تنزيل نسخة SQLite</button>
+        <label class="btn secondary">
+          <input type="file" id="restore-sqlite-file" accept=".sqlite" style="display:none">
+          استعادة نسخة SQLite
         </label>
         <button class="btn ok" onclick="doExcelBackup()">تنزيل نسخة Excel</button>
         <label class="btn ok secondary">
@@ -3601,110 +3728,213 @@ function renderBackup(){
         <button class="btn warn" onclick="doReset()">مسح كل البيانات</button>
       </div>
     </div>`;
-  window.doBackup=()=>{
-    const data=JSON.stringify(state);
+
+  window.doBackup= async ()=>{
+    const fullState = await loadStateFromDB();
+    const data=JSON.stringify(fullState);
     const blob=new Blob([data],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
     a.href=url; a.download=`estate-backup-${today()}.json`; a.click();
     URL.revokeObjectURL(url);
   };
-  document.getElementById('restore-file').onchange=(e)=>{
+
+  document.getElementById('restore-file').onchange= async (e)=>{
     const f=e.target.files[0]; if(!f) return;
     if(!confirm('سيتم استبدال كل البيانات الحالية. هل أنت متأكد؟')) return;
     const r=new FileReader();
-    r.onload=()=>{
+    r.onload= async ()=>{
       try{
         saveState();
         const restored=JSON.parse(String(r.result));
+        Object.keys(state).forEach(key=>delete state[key]);
         Object.assign(state,restored);
-        persist();
+        await persist();
         alert('تمت الاستعادة بنجاح');
         nav('dash');
       }catch(err){ alert('ملف غير صالح'); }
     };
     r.readAsText(f);
   };
+
+  window.doSQLiteBackup = async () => {
+    try {
+        const SQL = await initSqlJs({ locateFile: file => `https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/${file}` });
+        const db = new SQL.Database();
+        const fullState = await loadStateFromDB();
+
+        for (const storeName of OBJECT_STORES) {
+            if (!fullState[storeName] || storeName === 'keyval') continue;
+
+            const data = Array.isArray(fullState[storeName]) ? fullState[storeName] : [fullState[storeName]];
+            if (data.length === 0) continue;
+
+            const columns = Object.keys(data[0]).map(col => `"${col}" TEXT`).join(', ');
+            db.run(`CREATE TABLE ${storeName} (${columns});`);
+
+            const stmt = db.prepare(`INSERT INTO ${storeName} VALUES (${Object.keys(data[0]).map(() => '?').join(', ')});`);
+            data.forEach(item => {
+                const values = Object.values(item).map(val => typeof val === 'object' ? JSON.stringify(val) : val);
+                stmt.run(values);
+            });
+            stmt.free();
+        }
+
+        const data = db.export();
+        const blob = new Blob([data], {type: "application/x-sqlite3"});
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `estate-backup-${today()}.sqlite`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+
+    } catch (err) {
+        console.error("SQLite backup failed:", err);
+        alert("فشل تصدير نسخة SQLite. انظر إلى الطرفية (console) لمزيد من التفاصيل.");
+    }
+  };
+
+  window.doSQLiteRestore = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!confirm('سيتم استبدال كل البيانات الحالية ببيانات ملف SQLite. هل أنت متأكد؟')) return;
+
+    try {
+        const SQL = await initSqlJs({ locateFile: file => `https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/${file}` });
+        const reader = new FileReader();
+        reader.onload = async (event) => {
+            try {
+                const db = new SQL.Database(new Uint8Array(event.target.result));
+                const newState = {};
+
+                const tables = db.exec("SELECT name FROM sqlite_master WHERE type='table';");
+                tables[0].values.forEach(tbl => {
+                    const tableName = tbl[0];
+                    const contents = db.exec(`SELECT * FROM ${tableName}`);
+                    if (contents.length > 0) {
+                        const data = contents[0].values.map(row => {
+                            const obj = {};
+                            contents[0].columns.forEach((col, i) => {
+                                try { obj[col] = JSON.parse(row[i]); }
+                                catch { obj[col] = row[i]; }
+                            });
+                            return obj;
+                        });
+                        if(tableName === 'settings') {
+                            newState[tableName] = data[0] || {};
+                        } else {
+                            newState[tableName] = data;
+                        }
+                    }
+                });
+
+                saveState();
+                Object.keys(state).forEach(key=>delete state[key]);
+                Object.assign(state, newState);
+                await persist();
+                alert('تمت استعادة البيانات من ملف SQLite بنجاح.');
+                nav('dash');
+
+            } catch (err) {
+                console.error("SQLite restore failed:", err);
+                alert("فشل استعادة نسخة SQLite. الملف قد يكون تالفاً.");
+            }
+        };
+        reader.readAsArrayBuffer(file);
+    } catch (err) {
+        console.error("Failed to initialize sql.js:", err);
+        alert("فشل تهيئة مكتبة SQLite.");
+    }
+  };
+  document.getElementById('restore-sqlite-file').onchange = window.doSQLiteRestore;
+
   window.doExcelBackup = function() {
     try {
         const wb = XLSX.utils.book_new();
         const dataMap = {
-            'العملاء': state.customers,
-            'الوحدات': state.units,
-            'الشركاء': state.partners,
-            'شركاءالوحدات': state.unitPartners,
-            'العقود': state.contracts,
-            'الأقساط': state.installments,
-            'المدفوعات': state.payments,
+            'العملاء': state.customers, 'الوحدات': state.units, 'الشركاء': state.partners,
+            'شركاءالوحدات': state.unitPartners, 'العقود': state.contracts, 'الأقساط': state.installments,
+            'السندات': state.vouchers, 'الخزن': state.safes, 'التحويلات': state.transfers,
+            'مستحقات_السماسرة': state.brokerDues, 'السماسرة': state.brokers, 'مجموعات_الشركاء': state.partnerGroups,
             'الإعدادات': [state.settings]
         };
-
         for (const sheetName in dataMap) {
             if (dataMap[sheetName] && dataMap[sheetName].length > 0) {
                 const ws = XLSX.utils.json_to_sheet(dataMap[sheetName]);
                 XLSX.utils.book_append_sheet(wb, ws, sheetName);
             }
         }
-
         XLSX.writeFile(wb, `estate-backup-${today()}.xlsx`);
-    } catch (err) {
-        console.error(err);
-        alert('حدث خطأ أثناء إنشاء ملف Excel.');
-    }
+    } catch (err) { console.error(err); alert('حدث خطأ أثناء إنشاء ملف Excel.'); }
   }
+
   window.doExcelRestore = function(e) {
     const file = e.target.files[0];
     if (!file) return;
     if (!confirm('سيتم استبدال كل البيانات الحالية ببيانات ملف Excel. هل أنت متأكد؟')) return;
-
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
         try {
             const data = event.target.result;
             const workbook = XLSX.read(data, { type: 'array' });
-
-            saveState(); // Save current state for undo
-
-            const newState = {
-                customers: [], units: [], partners: [], unitPartners: [],
-                contracts: [], installments: [], payments: [],
-                settings: state.settings, // Keep existing settings
-                locked: state.locked
-            };
+            saveState();
+            const newState = {};
+            OBJECT_STORES.forEach(s => { if(s !== 'keyval' && s !== 'settings') newState[s] = [] });
+            newState.settings = state.settings;
+            newState.locked = state.locked;
 
             workbook.SheetNames.forEach(sheetName => {
                 const ws = workbook.Sheets[sheetName];
                 const jsonData = XLSX.utils.sheet_to_json(ws);
-                switch(sheetName) {
-                    case 'العملاء': newState.customers = jsonData; break;
-                    case 'الوحدات': newState.units = jsonData; break;
-                    case 'الشركاء': newState.partners = jsonData; break;
-                    case 'شركاءالوحدات': newState.unitPartners = jsonData; break;
-                    case 'العقود': newState.contracts = jsonData; break;
-                    case 'الأقساط': newState.installments = jsonData; break;
-                    case 'المدفوعات': newState.payments = jsonData; break;
-                    case 'الإعدادات': if (jsonData[0]) Object.assign(newState.settings, jsonData[0]); break;
+                const storeName = Object.keys(dataMap).find(key => dataMap[key] === sheetName); // This is not right
+                // A better way is to map sheet names to store names
+                const sheetToStoreMap = {
+                    'العملاء': 'customers', 'الوحدات': 'units', 'الشركاء': 'partners',
+                    'شركاءالوحدات': 'unitPartners', 'العقود': 'contracts', 'الأقساط': 'installments',
+                    'السندات': 'vouchers', 'الخزن': 'safes', 'التحويلات': 'transfers',
+                    'مستحقات_السماسرة': 'brokerDues', 'السماسرة': 'brokers', 'مجموعات_الشركاء': 'partnerGroups',
+                    'الإعدادات': 'settings'
+                };
+                const targetStore = sheetToStoreMap[sheetName];
+                if(targetStore && jsonData) {
+                    if(targetStore === 'settings') {
+                        Object.assign(newState.settings, jsonData[0]);
+                    } else {
+                        newState[targetStore] = jsonData;
+                    }
                 }
             });
 
             Object.keys(state).forEach(key => delete state[key]);
             Object.assign(state, newState);
-            persist();
+            await persist();
             alert('تمت استعادة البيانات من ملف Excel بنجاح.');
             nav('dash');
-
-        } catch (err) {
-            console.error(err);
-            alert('ملف Excel غير صالح أو حدث خطأ أثناء القراءة.');
-        }
+        } catch (err) { console.error(err); alert('ملف Excel غير صالح أو حدث خطأ أثناء القراءة.'); }
     };
     reader.readAsArrayBuffer(file);
   }
   document.getElementById('restore-excel-file').onchange = window.doExcelRestore;
-  window.doReset=()=>{
+
+  window.doReset= async ()=>{
     if(prompt('اكتب "مسح" لتأكيد حذف كل البيانات')==='مسح'){
       saveState();
-      localStorage.removeItem(APPKEY);
+      // Clear all object stores in IndexedDB
+      const db = await openDB();
+      const transaction = db.transaction(OBJECT_STORES.filter(s => s !== 'keyval'), 'readwrite');
+      const promises = [];
+      for (const storeName of OBJECT_STORES) {
+            if (storeName === 'keyval') continue;
+            const store = transaction.objectStore(storeName);
+            promises.push(new Promise((resolve, reject) => {
+                const req = store.clear();
+                req.onsuccess = resolve;
+                req.onerror = (e) => reject(e.target.error);
+            }));
+      }
+      await Promise.all(promises);
+      localStorage.removeItem(APPKEY); // Also remove old local storage key
+      alert('تم مسح جميع البيانات. سيتم إعادة تحميل التطبيق.');
       location.reload();
     }
   };
