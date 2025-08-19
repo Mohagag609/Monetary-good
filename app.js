@@ -248,7 +248,8 @@ async function initializeApp() {
                 state[storeName] = [];
             }
         });
-        if (!state.settings) {
+        // More robust check for settings
+        if (typeof state.settings !== 'object' || state.settings === null) {
             state.settings = {theme:'dark',font:16, pass:null};
         }
         if (!state.locked) {
@@ -261,8 +262,11 @@ async function initializeApp() {
 
         // Now that state is loaded, run the rest of the startup sequence
         applySettings();
-        document.getElementById('themeSel').value=state.settings.theme||'dark';
-        document.getElementById('fontSel').value=String(state.settings.font||16);
+        // Add guards to prevent crash if settings are still somehow invalid
+        if (state.settings) {
+            document.getElementById('themeSel').value=state.settings.theme||'dark';
+            document.getElementById('fontSel').value=String(state.settings.font||16);
+        }
 
         checkLock();
         // The first saveState should happen after the state is fully loaded
