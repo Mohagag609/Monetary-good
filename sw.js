@@ -1,4 +1,4 @@
-const CACHE_NAME = 'estate-pro-cache-v2';
+const CACHE_NAME = 'estate-pro-cache-v2'; // Start with v2 to be safe
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
@@ -8,21 +8,21 @@ const ASSETS_TO_CACHE = [
     '/manifest.json',
     'https://unpkg.com/htmx.org@1.9.10',
     'https://cdn.jsdelivr.net/npm/chart.js@3.7.1/dist/chart.min.js',
-    'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'
+    'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js',
+    'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js',
+    'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.wasm'
 ];
 
-// Install event: open cache and add assets
 self.addEventListener('install', (event) => {
     event.waitUntil(
         caches.open(CACHE_NAME)
             .then((cache) => {
-                console.log('Opened cache');
+                console.log('Opened cache and caching assets');
                 return cache.addAll(ASSETS_TO_CACHE);
             })
     );
 });
 
-// Activate event: clean up old caches
 self.addEventListener('activate', (event) => {
     const cacheWhitelist = [CACHE_NAME];
     event.waitUntil(
@@ -39,17 +39,14 @@ self.addEventListener('activate', (event) => {
     );
 });
 
-// Fetch event: serve assets from cache first
 self.addEventListener('fetch', (event) => {
     event.respondWith(
         caches.match(event.request)
             .then((response) => {
-                // Cache hit - return response
                 if (response) {
-                    return response;
+                    return response; // Serve from cache
                 }
-                // Not in cache - fetch from network
-                return fetch(event.request);
+                return fetch(event.request); // Fetch from network
             }
         )
     );
